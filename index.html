@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>La Podrida</title>
+
+<!-- PWA / iOS -->
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="La Podrida" />
+<meta name="theme-color" content="#14291F" />
+<link rel="apple-touch-icon" href="./icon-180.png" />
+<link rel="icon" href="./icon-180.png" />
+
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Nunito+Sans:wght@400;700;800&display=swap" rel="stylesheet" />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #14291F; }
+  * { -webkit-tap-highlight-color: transparent; }
+  button:active { transform: translateY(1px); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect } = React;
+
+/* ─────────────────────────────────────────────
+   LA PODRIDA — marcador de punts
+   ───────────────────────────────────────────── */
+
+const C = {
+  bg: "#14291F", bg2: "#1D3529", felt: "#2A4636",
+  cream: "#F6EDDC", cream2: "#EFE2C8", ink: "#2B241C",
+  red: "#B3352C", gold: "#D9A441", goldSoft: "#E8C98A", mut: "#9DB3A6",
+};
+const font = {
+  display: "'Alfa Slab One', serif",
+  body: "'Nunito Sans', -apple-system, sans-serif",
+};
+
+/* Utilitats */
+const uid = () => Math.random().toString(36).slice(2, 9);
+const maxCards = (n) => Math.floor(48 / n);
+const roundSeq = (n) => {
+  const m = maxCards(n);
+  const up = Array.from({ length: m }, (_, i) => i + 1);
+  const down = Array.from({ length: m - 1 }, (_, i) => m - 1 - i);
+  return [...up, ...down];
+};
+const fmtDate = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleDateString("ca-ES", { day: "numeric", month: "short", year: "numeric" }) +
+    " · " + d.toLocaleTimeString("ca-ES", { hour: "2-digit", minute: "2-digit" });
+};
+
+/* ── Persistència amb IndexedDB ── */
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("lapodrida", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function kvGet(k) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const t = db.transaction("kv").objectStore("kv").get(k);
+    t.onsuccess = () => res(t.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+async function kvSet(k, v) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const t = db.transaction("kv", "readwrite").objectStore("kv").put(v, k);
+    t.onsuccess = () => res();
+    t.onerror = () => rej(t.error);
+  });
+}
+
+/* Redueix les fotos abans de guardar-les (estalvia molt d'espai) */
+function shrink(dataUrl, max = 800) {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, max / Math.max(img.width, img.height));
+      if (s >= 1) return res(dataUrl);
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.width * s);
+      cv.height = Math.round(img.height * s);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      res(cv.toDataURL("image/jpeg", 0.82));
+    };
+    img.src = dataUrl;
+  });
+}
+
+/* Avatar amb foto o inicial */
+function Avatar({ profile, size = 44, ring = C.gold }) {
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%", flexShrink: 0,
+      border: `2.5px solid ${ring}`, overflow: "hidden",
+      background: C.felt, display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      {profile?.photo ? (
+        <img src={profile.photo} alt={profile.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      ) : (
+        <span style={{ fontFamily: font.display, color: C.goldSoft, fontSize: size * 0.42 }}>
+          {profile?.name?.[0]?.toUpperCase() || "?"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* Input de foto (càmera o galeria) */
+function PhotoButton({ label, onPhoto, photo, big }) {
+  const ref = useRef(null);
+  return (
+    <div style={{ textAlign: "center" }}>
+      <input
+        ref={ref} type="file" accept="image/*" capture="environment"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (!f) return;
+          const r = new FileReader();
+          r.onload = async () => onPhoto(await shrink(r.result, 500));
+          r.readAsDataURL(f);
+        }}
+      />
+      <button onClick={() => ref.current?.click()} style={{
+        width: big ? 140 : 96, height: big ? 140 : 96, borderRadius: 18,
+        border: `2px dashed ${photo ? C.gold : C.mut}`, background: C.bg2,
+        overflow: "hidden", cursor: "pointer", padding: 0,
+      }}>
+        {photo ? (
+          <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <span style={{ color: C.mut, fontFamily: font.body, fontSize: 13, fontWeight: 700 }}>📷<br />{label}</span>
+        )}
+      </button>
+    </div>
+  );
+}
+
+/* ── Filtres de guanyador/perdedor ── */
+function Stickers({ mode }) {
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none"
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+      <ellipse cx="50" cy="47" rx="21" ry="28" fill="none" stroke="rgba(255,255,255,.55)"
+        strokeWidth="0.7" strokeDasharray="2.5 2.5" />
+      {mode === "winner" ? (
+        <>
+          <text x="50" y="19" textAnchor="middle" fontSize="24">👑</text>
+          <ellipse cx="50" cy="63" rx="13" ry="6.5" fill="#fff" stroke="#8B2E2E" strokeWidth="1.4" />
+          <line x1="37.5" y1="63" x2="62.5" y2="63" stroke="#8B2E2E" strokeWidth="1" />
+          <line x1="43" y1="57" x2="43" y2="69" stroke="#E8DDCB" strokeWidth="0.7" />
+          <line x1="50" y1="56.5" x2="50" y2="69.5" stroke="#E8DDCB" strokeWidth="0.7" />
+          <line x1="57" y1="57" x2="57" y2="69" stroke="#E8DDCB" strokeWidth="0.7" />
+        </>
+      ) : (
+        <>
+          <line x1="33" y1="35" x2="44" y2="39" stroke="#2B241C" strokeWidth="1.6" strokeLinecap="round" />
+          <line x1="67" y1="35" x2="56" y2="39" stroke="#2B241C" strokeWidth="1.6" strokeLinecap="round" />
+          <text x="39" y="56" textAnchor="middle" fontSize="9">💧</text>
+          <text x="61" y="56" textAnchor="middle" fontSize="9">💧</text>
+          <text x="36" y="64" textAnchor="middle" fontSize="6">💧</text>
+          <text x="64" y="64" textAnchor="middle" fontSize="6">💧</text>
+          <path d="M38 69 Q50 58 62 69" fill="none" stroke="#2B241C" strokeWidth="2.2" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function drawStickers(ctx, w, h, mode) {
+  const X = (f) => (f / 100) * w;
+  const Y = (f) => (f / 100) * h;
+  ctx.textAlign = "center";
+  if (mode === "winner") {
+    ctx.font = `${X(26)}px serif`;
+    ctx.fillText("👑", X(50), Y(21));
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#8B2E2E";
+    ctx.lineWidth = Math.max(2, X(1.4));
+    ctx.beginPath();
+    ctx.ellipse(X(50), Y(63), X(13), Y(6.5), 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(37.5), Y(63)); ctx.lineTo(X(62.5), Y(63)); ctx.stroke();
+    ctx.strokeStyle = "#E8DDCB"; ctx.lineWidth = Math.max(1, X(0.7));
+    [43, 50, 57].forEach((x) => {
+      ctx.beginPath(); ctx.moveTo(X(x), Y(57)); ctx.lineTo(X(x), Y(69)); ctx.stroke();
+    });
+  } else {
+    ctx.strokeStyle = "#2B241C"; ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(2, X(1.6));
+    ctx.beginPath(); ctx.moveTo(X(33), Y(35)); ctx.lineTo(X(44), Y(39)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(67), Y(35)); ctx.lineTo(X(56), Y(39)); ctx.stroke();
+    ctx.font = `${X(9)}px serif`;
+    ctx.fillText("💧", X(39), Y(56)); ctx.fillText("💧", X(61), Y(56));
+    ctx.font = `${X(6)}px serif`;
+    ctx.fillText("💧", X(36), Y(64)); ctx.fillText("💧", X(64), Y(64));
+    ctx.lineWidth = Math.max(3, X(2.2));
+    ctx.beginPath(); ctx.moveTo(X(38), Y(69));
+    ctx.quadraticCurveTo(X(50), Y(58), X(62), Y(69)); ctx.stroke();
+  }
+}
+
+function FilterCam({ mode, onDone, onClose }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const fileRef = useRef(null);
+  const [live, setLive] = useState(false);
+  const [err, setErr] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" }, audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        setLive(true);
+      } catch {
+        setErr(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const capture = async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    const cv = document.createElement("canvas");
+    cv.width = v.videoWidth; cv.height = v.videoHeight;
+    const ctx = cv.getContext("2d");
+    ctx.translate(cv.width, 0); ctx.scale(-1, 1);
+    ctx.drawImage(v, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawStickers(ctx, cv.width, cv.height, mode);
+    onDone(await shrink(cv.toDataURL("image/jpeg", 0.85)));
+  };
+
+  const fromFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      const img = new Image();
+      img.onload = async () => {
+        const cv = document.createElement("canvas");
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        drawStickers(ctx, cv.width, cv.height, mode);
+        onDone(await shrink(cv.toDataURL("image/jpeg", 0.85)));
+      };
+      img.src = r.result;
+    };
+    r.readAsDataURL(f);
+  };
+
+  const title = mode === "winner" ? "Foto del guanyador 🥇" : "Foto del perdedor 💀";
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 20,
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 16,
+    }}>
+      <h2 style={{ fontFamily: font.display, color: C.cream, margin: "0 0 12px", fontSize: 20 }}>{title}</h2>
+      <div style={{
+        position: "relative", width: "100%", maxWidth: 340, aspectRatio: "3/4",
+        borderRadius: 18, overflow: "hidden", background: "#000",
+        border: `3px solid ${mode === "winner" ? C.gold : C.red}`,
+      }}>
+        <video ref={videoRef} playsInline muted
+          style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} />
+        <Stickers mode={mode} />
+        {!live && !err && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center",
+            justifyContent: "center", color: C.mut, fontWeight: 700 }}>Obrint càmera…</div>
+        )}
+        {err && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: 12, padding: 20, textAlign: "center" }}>
+            <p style={{ color: C.cream, fontWeight: 700, margin: 0, fontSize: 14 }}>
+              La càmera en viu no està disponible. Fes la foto amb la càmera normal i
+              el filtre s'hi aplicarà automàticament.
+            </p>
+            <input ref={fileRef} type="file" accept="image/*" capture="user"
+              style={{ display: "none" }} onChange={fromFile} />
+            <button onClick={() => fileRef.current?.click()} style={{
+              padding: "12px 20px", borderRadius: 12, border: "none", background: C.gold,
+              color: C.ink, fontFamily: font.display, fontSize: 15, cursor: "pointer",
+            }}>📷 Fer foto</button>
+          </div>
+        )}
+      </div>
+      <p style={{ color: C.mut, fontWeight: 700, fontSize: 13, margin: "10px 0 14px" }}>
+        Alinea la cara amb l'oval puntejat
+      </p>
+      <div style={{ display: "flex", gap: 12 }}>
+        <button onClick={onClose} style={{
+          padding: "12px 20px", borderRadius: 12, border: `2px solid ${C.mut}`, background: "none",
+          color: C.cream, fontWeight: 800, cursor: "pointer",
+        }}>Cancel·lar</button>
+        {live && (
+          <button onClick={capture} style={{
+            padding: "12px 28px", borderRadius: 12, border: "none", background: C.red,
+            color: C.cream, fontFamily: font.display, fontSize: 16, cursor: "pointer",
+          }}>📸 Capturar</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Botó gran de menú */
+function BigBtn({ children, onClick, accent }) {
+  return (
+    <button onClick={onClick} style={{
+      width: "100%", padding: "18px 20px", borderRadius: 16, border: "none",
+      background: accent ? C.red : C.cream, color: accent ? C.cream : C.ink,
+      fontFamily: font.display, fontSize: 18, letterSpacing: 0.5,
+      boxShadow: "0 3px 0 rgba(0,0,0,.35)", cursor: "pointer",
+    }}>
+      {children}
+    </button>
+  );
+}
+
+/* Carta petita per triar números */
+function NumCard({ n, onClick, disabled, forbidden }) {
+  return (
+    <button onClick={onClick} disabled={disabled || forbidden} style={{
+      width: 52, height: 70, borderRadius: 9, position: "relative",
+      border: `2px solid ${forbidden ? C.red : C.ink}`,
+      background: forbidden ? "#D8C9B4" : C.cream,
+      color: forbidden ? C.red : C.ink,
+      fontFamily: font.display, fontSize: 24,
+      opacity: disabled && !forbidden ? 0.35 : 1,
+      cursor: forbidden || disabled ? "not-allowed" : "pointer",
+      boxShadow: forbidden ? "none" : "0 2px 0 rgba(0,0,0,.3)",
+    }}>
+      {n}
+      {forbidden && (
+        <span style={{
+          position: "absolute", inset: 0, display: "flex", alignItems: "center",
+          justifyContent: "center", fontSize: 40, color: C.red, opacity: 0.85,
+        }}>✕</span>
+      )}
+    </button>
+  );
+}
+
+function LaPodrida() {
+  const [profiles, setProfiles] = useState([]);
+  const [games, setGames] = useState([]);
+  const [ready, setReady] = useState(false);
+
+  const [view, setView] = useState("home");
+  const [detailId, setDetailId] = useState(null);
+
+  const [npName, setNpName] = useState("");
+  const [npPhoto, setNpPhoto] = useState(null);
+
+  const [order, setOrder] = useState([]);
+
+  const [game, setGame] = useState(null);
+  const [showRank, setShowRank] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [missFor, setMissFor] = useState(null);
+  const [finWinner, setFinWinner] = useState(null);
+  const [finLoser, setFinLoser] = useState(null);
+  const [camFor, setCamFor] = useState(null);
+
+  /* Càrrega inicial des d'IndexedDB */
+  useEffect(() => {
+    (async () => {
+      try {
+        const p = await kvGet("profiles");
+        const gs = await kvGet("games");
+        const cur = await kvGet("game");
+        if (p) setProfiles(p);
+        if (gs) setGames(gs);
+        if (cur) {
+          setGame(cur);
+          setView(cur.phase === "done" ? "finish" : "game");
+        }
+      } catch (e) { console.error(e); }
+      setReady(true);
+    })();
+  }, []);
+
+  /* Guardar automàticament cada canvi */
+  useEffect(() => { if (ready) kvSet("profiles", profiles); }, [profiles, ready]);
+  useEffect(() => { if (ready) kvSet("games", games); }, [games, ready]);
+  useEffect(() => { if (ready) kvSet("game", game); }, [game, ready]);
+
+  const byId = (id) => profiles.find((p) => p.id === id);
+
+  const statsOf = (id) => {
+    const played = games.filter((g) => g.players.some((p) => p.profileId === id));
+    const pts = played.map((g) => g.players.find((p) => p.profileId === id).points);
+    const firsts = played.filter((g) => g.winnerId === id).length;
+    const lasts = played.filter((g) => g.loserId === id).length;
+    return {
+      played: played.length,
+      max: pts.length ? Math.max(...pts) : null,
+      min: pts.length ? Math.min(...pts) : null,
+      firsts, lasts,
+    };
+  };
+
+  const startGame = () => {
+    const seq = roundSeq(order.length);
+    setGame({
+      playerIds: [...order], seq, round: 0, phase: "bets",
+      bets: {}, turn: 0,
+      scores: Object.fromEntries(order.map((id) => [id, 0])),
+    });
+    setView("game");
+  };
+
+  const g = game;
+  const N = g ? g.playerIds.length : 0;
+  const cards = g ? g.seq[g.round] : 0;
+  const dealerIdx = g ? g.round % N : 0;
+  const betOrder = g
+    ? Array.from({ length: N }, (_, i) => g.playerIds[(dealerIdx + 1 + i) % N])
+    : [];
+  const currentId = g ? betOrder[g.turn] : null;
+  const sumBets = g ? Object.values(g.bets).reduce((a, b) => a + b, 0) : 0;
+  const isLastBettor = g && g.turn === N - 1;
+  const forbiddenN = isLastBettor ? cards - sumBets : -1;
+
+  const placeBet = (n) => {
+    const bets = { ...g.bets, [currentId]: n };
+    if (g.turn + 1 < N) setGame({ ...g, bets, turn: g.turn + 1 });
+    else setGame({ ...g, bets, phase: "play" });
+  };
+
+  const startResults = () => setGame({ ...g, phase: "results", turn: 0 });
+
+  const applyResult = (id, delta) => {
+    const scores = { ...g.scores, [id]: g.scores[id] + delta };
+    setMissFor(null);
+    if (g.turn + 1 < N) {
+      setGame({ ...g, scores, turn: g.turn + 1 });
+    } else if (g.round + 1 < g.seq.length) {
+      setGame({ ...g, scores, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+    } else {
+      setGame({ ...g, scores, phase: "done" });
+      setFinWinner(null); setFinLoser(null);
+      setView("finish");
+    }
+  };
+
+  const ranking = g
+    ? [...g.playerIds].sort((a, b) => g.scores[b] - g.scores[a])
+    : [];
+
+  const saveGame = () => {
+    const winnerId = ranking[0];
+    const loserId = ranking[ranking.length - 1];
+    setGames([
+      {
+        id: uid(), date: new Date().toISOString(),
+        players: g.playerIds.map((id) => ({ profileId: id, points: g.scores[id] })),
+        winnerId, loserId,
+        winnerPhoto: finWinner, loserPhoto: finLoser,
+      },
+      ...games,
+    ]);
+    setGame(null);
+    setView("history");
+  };
+
+  const Shell = ({ title, back, children, right }) => (
+    <div style={{
+      minHeight: "100vh", background: C.bg, fontFamily: font.body, color: C.cream,
+      paddingTop: "env(safe-area-inset-top)",
+    }}>
+      <div style={{ maxWidth: 460, margin: "0 auto", padding: "16px 16px 40px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, minHeight: 40 }}>
+          {back && (
+            <button onClick={back} style={{
+              background: "none", border: `1.5px solid ${C.mut}`, color: C.cream,
+              borderRadius: 10, padding: "6px 12px", fontWeight: 800, cursor: "pointer",
+            }}>←</button>
+          )}
+          <h1 style={{ fontFamily: font.display, fontSize: 22, margin: 0, flex: 1, color: C.goldSoft }}>{title}</h1>
+          {right}
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+
+  if (!ready) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, display: "flex",
+        alignItems: "center", justifyContent: "center", color: C.mut,
+        fontFamily: font.body, fontWeight: 700 }}>Carregant…</div>
+    );
+  }
+
+  /* ═══════════ PANTALLES ═══════════ */
+
+  if (view === "home") {
+    return (
+      <Shell title="">
+        <div style={{ textAlign: "center", margin: "30px 0 40px" }}>
+          <div style={{ fontSize: 44 }}>🃏</div>
+          <h1 style={{ fontFamily: font.display, fontSize: 40, margin: "6px 0 2px", color: C.cream }}>
+            La <span style={{ color: C.gold }}>Podrida</span>
+          </h1>
+          <p style={{ color: C.mut, margin: 0, fontWeight: 700 }}>Marcador de punts</p>
+        </div>
+        <div style={{ display: "grid", gap: 14 }}>
+          <BigBtn accent onClick={() => { setOrder([]); setView("setup"); }}>▶ Partida nova</BigBtn>
+          <BigBtn onClick={() => setView("history")}>🏆 Partides anteriors</BigBtn>
+          <BigBtn onClick={() => setView("profiles")}>👤 Perfils</BigBtn>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (view === "profiles") {
+    return (
+      <Shell title="Perfils" back={() => setView("home")}>
+        <BigBtn accent onClick={() => { setNpName(""); setNpPhoto(null); setView("newProfile"); }}>
+          + Crear nou perfil
+        </BigBtn>
+        <div style={{ display: "grid", gap: 10, marginTop: 18 }}>
+          {profiles.length === 0 && (
+            <p style={{ color: C.mut, textAlign: "center" }}>Encara no hi ha cap perfil. Crea el primer!</p>
+          )}
+          {profiles.map((p) => (
+            <button key={p.id}
+              onClick={() => { setDetailId(p.id); setView("profileDetail"); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 12, padding: 12,
+                background: C.bg2, border: `1px solid ${C.felt}`, borderRadius: 14,
+                color: C.cream, cursor: "pointer", textAlign: "left",
+              }}>
+              <Avatar profile={p} />
+              <span style={{ fontWeight: 800, fontSize: 17, flex: 1 }}>{p.name}</span>
+              <span style={{ color: C.mut }}>›</span>
+            </button>
+          ))}
+        </div>
+      </Shell>
+    );
+  }
+
+  if (view === "newProfile") {
+    return (
+      <Shell title="Nou perfil" back={() => setView("profiles")}>
+        <div style={{ display: "grid", gap: 20, justifyItems: "center", marginTop: 10 }}>
+          <PhotoButton label="Afegir foto" photo={npPhoto} onPhoto={setNpPhoto} big />
+          <input
+            value={npName}
+            onChange={(e) => setNpName(e.target.value)}
+            placeholder="Nom d'usuari"
+            style={{
+              width: "100%", padding: "14px 16px", borderRadius: 12, border: `2px solid ${C.felt}`,
+              background: C.cream, color: C.ink, fontSize: 17, fontWeight: 700, fontFamily: font.body,
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ width: "100%" }}>
+            <BigBtn accent onClick={() => {
+              if (!npName.trim()) return;
+              setProfiles([...profiles, { id: uid(), name: npName.trim(), photo: npPhoto }]);
+              setView("profiles");
+            }}>Guardar perfil</BigBtn>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (view === "profileDetail") {
+    const p = byId(detailId);
+    if (!p) { setView("profiles"); return null; }
+    const s = statsOf(p.id);
+    const Stat = ({ label, value }) => (
+      <div style={{ background: C.bg2, borderRadius: 14, padding: "14px 10px", textAlign: "center", border: `1px solid ${C.felt}` }}>
+        <div style={{ fontFamily: font.display, fontSize: 26, color: C.gold }}>{value ?? "—"}</div>
+        <div style={{ color: C.mut, fontSize: 12, fontWeight: 700 }}>{label}</div>
+      </div>
+    );
+    return (
+      <Shell title={p.name} back={() => setView("profiles")}>
+        <div style={{ display: "flex", justifyContent: "center", margin: "6px 0 22px" }}>
+          <Avatar profile={p} size={110} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Stat label="Partides jugades" value={s.played} />
+          <Stat label="Cops 1r 🥇" value={s.firsts} />
+          <Stat label="Màxim de punts" value={s.max} />
+          <Stat label="Mínim de punts" value={s.min} />
+          <Stat label="Cops últim 💀" value={s.lasts} />
+        </div>
+      </Shell>
+    );
+  }
+
+  if (view === "setup") {
+    const toggle = (id) =>
+      setOrder(order.includes(id) ? order.filter((x) => x !== id) : [...order, id]);
+    return (
+      <Shell title="Partida nova" back={() => setView("home")}>
+        <p style={{ color: C.mut, fontWeight: 700, marginTop: 0 }}>
+          Toca els jugadors <b style={{ color: C.goldSoft }}>en ordre d'asseguda</b> (el 1r reparteix la primera ronda).
+        </p>
+        {profiles.length < 2 && (
+          <p style={{ color: C.goldSoft }}>Necessites com a mínim 2 perfils. Ves a Perfils i crea'ls primer.</p>
+        )}
+        <div style={{ display: "grid", gap: 10 }}>
+          {profiles.map((p) => {
+            const pos = order.indexOf(p.id);
+            const sel = pos >= 0;
+            return (
+              <button key={p.id} onClick={() => toggle(p.id)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 12, padding: 12,
+                  background: sel ? C.felt : C.bg2, borderRadius: 14, color: C.cream,
+                  border: `2px solid ${sel ? C.gold : C.felt}`, cursor: "pointer", textAlign: "left",
+                }}>
+                <Avatar profile={p} ring={sel ? C.gold : C.mut} />
+                <span style={{ fontWeight: 800, fontSize: 16, flex: 1 }}>{p.name}</span>
+                {sel && (
+                  <span style={{
+                    fontFamily: font.display, background: C.gold, color: C.ink,
+                    borderRadius: "50%", width: 30, height: 30, display: "flex",
+                    alignItems: "center", justifyContent: "center",
+                  }}>{pos + 1}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {order.length >= 2 && (
+          <div style={{ marginTop: 18, display: "grid", gap: 12 }}>
+            <p style={{ color: C.mut, textAlign: "center", margin: 0, fontWeight: 700 }}>
+              {order.length} jugadors · fins a {maxCards(order.length)} cartes · {roundSeq(order.length).length} rondes
+            </p>
+            <BigBtn accent onClick={startGame}>Començar partida</BigBtn>
+          </div>
+        )}
+      </Shell>
+    );
+  }
+
+  if (view === "game" && g) {
+    const cur = byId(currentId);
+    const dealer = byId(g.playerIds[dealerIdx]);
+    const header = (
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => setShowRank(true)} style={{
+          background: C.gold, border: "none", borderRadius: 10, padding: "8px 12px",
+          fontFamily: font.display, color: C.ink, fontSize: 13, cursor: "pointer",
+        }}>Puntuació</button>
+        <button onClick={() => setConfirmEnd(true)} style={{
+          background: "none", border: `1.5px solid ${C.red}`, borderRadius: 10, padding: "8px 12px",
+          fontFamily: font.display, color: "#E07B72", fontSize: 13, cursor: "pointer",
+        }}>Finalitzar</button>
+      </div>
+    );
+
+    return (
+      <Shell title={`Ronda ${g.round + 1}/${g.seq.length}`} right={header}>
+        <div style={{
+          background: C.bg2, borderRadius: 14, padding: "10px 14px", marginBottom: 16,
+          display: "flex", justifyContent: "space-between", border: `1px solid ${C.felt}`,
+          fontWeight: 700, color: C.mut, fontSize: 14,
+        }}>
+          <span>🂠 {cards} {cards === 1 ? "carta" : "cartes"}</span>
+          <span>Reparteix: <b style={{ color: C.goldSoft }}>{dealer?.name}</b></span>
+        </div>
+
+        {g.phase === "bets" && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+              <Avatar profile={cur} size={54} />
+              <div>
+                <div style={{ fontFamily: font.display, fontSize: 22 }}>{cur?.name}</div>
+                <div style={{ color: C.mut, fontWeight: 700, fontSize: 13 }}>
+                  Quantes n'apostes?{isLastBettor && " (últim a apostar)"}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+              {Array.from({ length: cards + 1 }, (_, n) => (
+                <NumCard key={n} n={n}
+                  forbidden={isLastBettor && n === forbiddenN}
+                  onClick={() => placeBet(n)} />
+              ))}
+            </div>
+            {isLastBettor && forbiddenN >= 0 && forbiddenN <= cards && (
+              <p style={{ color: C.goldSoft, fontWeight: 700, fontSize: 13, marginTop: 14 }}>
+                ✕ No pot apostar {forbiddenN}: la suma no pot quadrar amb les {cards} {cards === 1 ? "carta" : "cartes"}.
+              </p>
+            )}
+            {g.turn > 0 && (
+              <div style={{ marginTop: 20, display: "grid", gap: 6 }}>
+                {betOrder.slice(0, g.turn).map((id) => (
+                  <div key={id} style={{ display: "flex", gap: 8, color: C.mut, fontWeight: 700, fontSize: 14 }}>
+                    <span style={{ flex: 1 }}>{byId(id)?.name}</span>
+                    <span style={{ color: C.cream }}>aposta {g.bets[id]}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {g.phase === "play" && (
+          <div style={{ textAlign: "center", marginTop: 30 }}>
+            <div style={{ fontSize: 50 }}>🎴</div>
+            <h2 style={{ fontFamily: font.display, color: C.cream }}>Jugueu la ronda!</h2>
+            <div style={{ display: "grid", gap: 6, margin: "16px 0 26px" }}>
+              {betOrder.map((id) => (
+                <div key={id} style={{ color: C.mut, fontWeight: 700 }}>
+                  {byId(id)?.name} → aposta <b style={{ color: C.goldSoft }}>{g.bets[id]}</b>
+                </div>
+              ))}
+            </div>
+            <BigBtn accent onClick={startResults}>Ja hem acabat — apuntar resultats</BigBtn>
+          </div>
+        )}
+
+        {g.phase === "results" && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+              <Avatar profile={cur} size={54} />
+              <div>
+                <div style={{ fontFamily: font.display, fontSize: 22 }}>{cur?.name}</div>
+                <div style={{ color: C.mut, fontWeight: 700, fontSize: 13 }}>
+                  Apostava {g.bets[currentId]} — ha encertat?
+                </div>
+              </div>
+            </div>
+            {missFor !== currentId ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
+                <button
+                  onClick={() => applyResult(currentId, 10 + 3 * g.bets[currentId])}
+                  style={{
+                    padding: "20px 0", borderRadius: 14, border: "none", background: "#3E7A4E",
+                    color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
+                    boxShadow: "0 3px 0 rgba(0,0,0,.35)",
+                  }}>
+                  Sí ✓<div style={{ fontSize: 13, fontFamily: font.body, fontWeight: 800 }}>+{10 + 3 * g.bets[currentId]} punts</div>
+                </button>
+                <button
+                  onClick={() => setMissFor(currentId)}
+                  style={{
+                    padding: "20px 0", borderRadius: 14, border: "none", background: C.red,
+                    color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
+                    boxShadow: "0 3px 0 rgba(0,0,0,.35)",
+                  }}>
+                  No ✕
+                </button>
+              </div>
+            ) : (
+              <>
+                <p style={{ color: C.goldSoft, fontWeight: 700, marginTop: 16 }}>De quantes ha fallat?</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                  {Array.from({ length: cards }, (_, i) => i + 1).map((n) => (
+                    <NumCard key={n} n={`−${3 * n}`} onClick={() => applyResult(currentId, -3 * n)} />
+                  ))}
+                </div>
+                <p style={{ color: C.mut, fontSize: 12, marginTop: 10 }}>Cada errada resta 3 punts.</p>
+              </>
+            )}
+          </>
+        )}
+
+        {confirmEnd && (
+          <div onClick={() => setConfirmEnd(false)} style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.7)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 11,
+          }}>
+            <div onClick={(e) => e.stopPropagation()} style={{
+              background: C.cream, color: C.ink, borderRadius: 18, padding: 20, width: "100%", maxWidth: 360,
+              textAlign: "center",
+            }}>
+              <h2 style={{ fontFamily: font.display, margin: "0 0 8px" }}>Finalitzar partida?</h2>
+              <p style={{ fontWeight: 700, color: "#6B5F4E", margin: "0 0 16px", fontSize: 14 }}>
+                Es guardarà amb la puntuació tal com està ara (ronda {g.round + 1} de {g.seq.length}).
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <button onClick={() => setConfirmEnd(false)} style={{
+                  padding: 12, borderRadius: 12, border: `2px solid ${C.ink}`, background: "none",
+                  color: C.ink, fontWeight: 800, cursor: "pointer",
+                }}>Continuar jugant</button>
+                <button onClick={() => {
+                  setConfirmEnd(false);
+                  setFinWinner(null); setFinLoser(null);
+                  setGame({ ...g, phase: "done" });
+                  setView("finish");
+                }} style={{
+                  padding: 12, borderRadius: 12, border: "none", background: C.red,
+                  color: C.cream, fontWeight: 800, cursor: "pointer",
+                }}>Finalitzar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showRank && (
+          <div onClick={() => setShowRank(false)} style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.7)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 10,
+          }}>
+            <div onClick={(e) => e.stopPropagation()} style={{
+              background: C.cream, color: C.ink, borderRadius: 18, padding: 20, width: "100%", maxWidth: 380,
+            }}>
+              <h2 style={{ fontFamily: font.display, margin: "0 0 14px", textAlign: "center" }}>Classificació</h2>
+              <div style={{ display: "grid", gap: 10 }}>
+                {ranking.map((id, i) => (
+                  <div key={id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontFamily: font.display, width: 22, color: i === 0 ? C.gold : C.ink }}>{i + 1}</span>
+                    <Avatar profile={byId(id)} size={38} ring={i === 0 ? C.gold : C.ink} />
+                    <span style={{ fontWeight: 800, flex: 1 }}>{byId(id)?.name}</span>
+                    <span style={{ fontFamily: font.display, fontSize: 20, color: g.scores[id] < 0 ? C.red : C.ink }}>
+                      {g.scores[id]}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => setShowRank(false)} style={{
+                marginTop: 16, width: "100%", padding: 12, borderRadius: 12, border: "none",
+                background: C.ink, color: C.cream, fontWeight: 800, cursor: "pointer",
+              }}>Tancar</button>
+            </div>
+          </div>
+        )}
+      </Shell>
+    );
+  }
+
+  if (view === "finish" && g) {
+    const winner = byId(ranking[0]);
+    const loser = byId(ranking[ranking.length - 1]);
+    return (
+      <Shell title="Final de partida">
+        <div style={{ textAlign: "center" }}>
+          <h2 style={{ fontFamily: font.display, color: C.gold, fontSize: 26, margin: "4px 0" }}>
+            🏆 {winner?.name} guanya amb {g.scores[ranking[0]]} punts!
+          </h2>
+          <p style={{ color: C.mut, fontWeight: 700 }}>
+            💀 {loser?.name} queda últim amb {g.scores[ranking[ranking.length - 1]]}.
+          </p>
+        </div>
+        <div style={{ display: "flex", justifyContent: "center", gap: 24, margin: "24px 0" }}>
+          {[
+            { mode: "winner", label: "Foto del 🥇", photo: finWinner },
+            { mode: "loser", label: "Foto del 💀", photo: finLoser },
+          ].map(({ mode, label, photo }) => (
+            <div key={mode}>
+              <p style={{ textAlign: "center", color: C.goldSoft, fontWeight: 800, margin: "0 0 8px" }}>{label}</p>
+              <button onClick={() => setCamFor(mode)} style={{
+                width: 140, height: 140, borderRadius: 18, padding: 0, overflow: "hidden",
+                border: `2px dashed ${photo ? C.gold : C.mut}`, background: C.bg2, cursor: "pointer",
+              }}>
+                {photo ? (
+                  <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <span style={{ color: C.mut, fontWeight: 700, fontSize: 13 }}>
+                    📷<br />{mode === "winner" ? "Amb corona 👑" : "Amb llàgrimes 💧"}
+                  </span>
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+        {camFor && (
+          <FilterCam
+            mode={camFor}
+            onClose={() => setCamFor(null)}
+            onDone={(ph) => {
+              if (camFor === "winner") setFinWinner(ph); else setFinLoser(ph);
+              setCamFor(null);
+            }}
+          />
+        )}
+        <BigBtn accent onClick={saveGame}>Guardar partida</BigBtn>
+        <p style={{ color: C.mut, fontSize: 12, textAlign: "center", marginTop: 12 }}>
+          Les fotos són opcionals — pots guardar sense.
+        </p>
+      </Shell>
+    );
+  }
+
+  if (view === "history") {
+    return (
+      <Shell title="Partides anteriors" back={() => setView("home")}>
+        {games.length === 0 && (
+          <p style={{ color: C.mut, textAlign: "center", marginTop: 30 }}>
+            Encara no hi ha cap partida guardada. Juga la primera!
+          </p>
+        )}
+        <div style={{ display: "grid", gap: 14 }}>
+          {games.map((gm) => {
+            const w = byId(gm.winnerId), l = byId(gm.loserId);
+            const wPts = gm.players.find((p) => p.profileId === gm.winnerId)?.points;
+            const lPts = gm.players.find((p) => p.profileId === gm.loserId)?.points;
+            const Pod = ({ photo, profile, label, pts, gold }) => (
+              <div style={{ textAlign: "center", flex: 1 }}>
+                <div style={{
+                  width: 84, height: 84, borderRadius: 14, overflow: "hidden", margin: "0 auto",
+                  border: `2.5px solid ${gold ? C.gold : C.red}`, background: C.felt,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <Avatar profile={profile} size={60} ring="transparent" />}
+                </div>
+                <div style={{ fontWeight: 800, marginTop: 6 }}>{label} {profile?.name}</div>
+                <div style={{ color: C.mut, fontWeight: 700, fontSize: 13 }}>{pts} punts</div>
+              </div>
+            );
+            return (
+              <div key={gm.id} style={{ background: C.bg2, borderRadius: 16, padding: 14, border: `1px solid ${C.felt}` }}>
+                <div style={{ color: C.mut, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>
+                  {fmtDate(gm.date)} · {gm.players.length} jugadors
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <Pod photo={gm.winnerPhoto} profile={w} label="🥇" pts={wPts} gold />
+                  <Pod photo={gm.loserPhoto} profile={l} label="💀" pts={lPts} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Shell>
+    );
+  }
+
+  return null;
+}
+
+/* Registre del service worker (perquè funcioni offline) */
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<LaPodrida />);
+</script>
+</body>
+</html>
