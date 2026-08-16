@@ -166,13 +166,10 @@ function Stickers({ mode }) {
         <text x="50" y="19" textAnchor="middle" fontSize="24">👑</text>
       ) : (
         <>
-          <line x1="33" y1="35" x2="44" y2="39" stroke="#2B241C" strokeWidth="1.6" strokeLinecap="round" />
-          <line x1="67" y1="35" x2="56" y2="39" stroke="#2B241C" strokeWidth="1.6" strokeLinecap="round" />
           <text x="39" y="56" textAnchor="middle" fontSize="9">💧</text>
           <text x="61" y="56" textAnchor="middle" fontSize="9">💧</text>
           <text x="36" y="64" textAnchor="middle" fontSize="6">💧</text>
           <text x="64" y="64" textAnchor="middle" fontSize="6">💧</text>
-          <path d="M38 69 Q50 58 62 69" fill="none" stroke="#2B241C" strokeWidth="2.2" strokeLinecap="round" />
         </>
       )}
     </svg>
@@ -187,17 +184,10 @@ function drawStickers(ctx, w, h, mode) {
     ctx.font = `${X(26)}px serif`;
     ctx.fillText("👑", X(50), Y(21));
   } else {
-    ctx.strokeStyle = "#2B241C"; ctx.lineCap = "round";
-    ctx.lineWidth = Math.max(2, X(1.6));
-    ctx.beginPath(); ctx.moveTo(X(33), Y(35)); ctx.lineTo(X(44), Y(39)); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(X(67), Y(35)); ctx.lineTo(X(56), Y(39)); ctx.stroke();
     ctx.font = `${X(9)}px serif`;
     ctx.fillText("💧", X(39), Y(56)); ctx.fillText("💧", X(61), Y(56));
     ctx.font = `${X(6)}px serif`;
     ctx.fillText("💧", X(36), Y(64)); ctx.fillText("💧", X(64), Y(64));
-    ctx.lineWidth = Math.max(3, X(2.2));
-    ctx.beginPath(); ctx.moveTo(X(38), Y(69));
-    ctx.quadraticCurveTo(X(50), Y(58), X(62), Y(69)); ctx.stroke();
   }
 }
 
@@ -422,6 +412,7 @@ function LaPodrida() {
   const [lightbox, setLightbox] = useState(null);   // foto ampliada
   const [gameDetail, setGameDetail] = useState(null); // partida amb puntuació completa oberta
   const [confirmDel, setConfirmDel] = useState(null); // id de partida a eliminar
+  const [liarAlert, setLiarAlert] = useState(false);  // "algú ha mentit!"
 
   /* Càrrega inicial des d'IndexedDB */
   useEffect(() => {
@@ -489,20 +480,43 @@ function LaPodrida() {
     else setGame({ ...g, bets, phase: "play" });
   };
 
-  const startResults = () => setGame({ ...g, phase: "results", turn: 0 });
+  const startResults = () => setGame({ ...g, phase: "results", turn: 0, results: {} });
 
-  const applyResult = (id, delta) => {
+  const applyResult = (id, delta, hit) => {
+    const results = { ...(g.results || {}), [id]: { delta, hit } };
     const scores = { ...g.scores, [id]: g.scores[id] + delta };
     setMissFor(null);
     if (g.turn + 1 < N) {
-      setGame({ ...g, scores, turn: g.turn + 1 });
-    } else if (g.round + 1 < g.seq.length) {
-      setGame({ ...g, scores, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+      setGame({ ...g, scores, results, turn: g.turn + 1 });
+      return;
+    }
+    /* Últim jugador: si tots han "encertat", és impossible (la suma
+       d'apostes mai quadra amb les bases) → algú ha mentit */
+    if (Object.values(results).every((r) => r.hit)) {
+      const reverted = { ...g.scores };
+      Object.entries(g.results || {}).forEach(([pid, r]) => { reverted[pid] -= r.delta; });
+      setGame({ ...g, scores: reverted, results: {}, turn: 0 });
+      setLiarAlert(true);
+      return;
+    }
+    if (g.round + 1 < g.seq.length) {
+      setGame({ ...g, scores, results: {}, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
     } else {
-      setGame({ ...g, scores, phase: "done" });
+      setGame({ ...g, scores, results: {}, phase: "done" });
       setFinWinner(null); setFinLoser(null);
       setView("finish");
     }
+  };
+
+  const undoResult = () => {
+    const prev = betOrder[g.turn - 1];
+    const r = (g.results || {})[prev];
+    if (!r) return;
+    const scores = { ...g.scores, [prev]: g.scores[prev] - r.delta };
+    const results = { ...g.results };
+    delete results[prev];
+    setMissFor(null);
+    setGame({ ...g, scores, results, turn: g.turn - 1 });
   };
 
   const ranking = g
@@ -802,38 +816,76 @@ function LaPodrida() {
               </div>
             </div>
             {missFor !== currentId ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
-                <button
-                  onClick={() => applyResult(currentId, 10 + 3 * g.bets[currentId])}
-                  style={{
-                    padding: "20px 0", borderRadius: 14, border: "none", background: "#3E7A4E",
-                    color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
-                    boxShadow: "0 3px 0 rgba(0,0,0,.35)",
-                  }}>
-                  Sí ✓<div style={{ fontSize: 13, fontFamily: font.body, fontWeight: 800 }}>+{10 + 3 * g.bets[currentId]} punts</div>
-                </button>
-                <button
-                  onClick={() => setMissFor(currentId)}
-                  style={{
-                    padding: "20px 0", borderRadius: 14, border: "none", background: C.red,
-                    color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
-                    boxShadow: "0 3px 0 rgba(0,0,0,.35)",
-                  }}>
-                  No ✕
-                </button>
-              </div>
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
+                  <button
+                    onClick={() => applyResult(currentId, 10 + 3 * g.bets[currentId], true)}
+                    style={{
+                      padding: "20px 0", borderRadius: 14, border: "none", background: "#3E7A4E",
+                      color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
+                      boxShadow: "0 3px 0 rgba(0,0,0,.35)",
+                    }}>
+                    Sí ✓<div style={{ fontSize: 13, fontFamily: font.body, fontWeight: 800 }}>+{10 + 3 * g.bets[currentId]} punts</div>
+                  </button>
+                  <button
+                    onClick={() => setMissFor(currentId)}
+                    style={{
+                      padding: "20px 0", borderRadius: 14, border: "none", background: C.red,
+                      color: C.cream, fontFamily: font.display, fontSize: 20, cursor: "pointer",
+                      boxShadow: "0 3px 0 rgba(0,0,0,.35)",
+                    }}>
+                    No ✕
+                  </button>
+                </div>
+                {g.turn > 0 && (
+                  <button onClick={undoResult} style={{
+                    marginTop: 16, padding: "10px 14px", borderRadius: 12,
+                    border: `1.5px solid ${C.mut}`, background: "none", color: C.cream,
+                    fontWeight: 800, fontSize: 13, cursor: "pointer",
+                  }}>↩ Desfer el resultat de {byId(betOrder[g.turn - 1])?.name}</button>
+                )}
+              </>
             ) : (
               <>
                 <p style={{ color: C.goldSoft, fontWeight: 700, marginTop: 16 }}>De quantes ha fallat?</p>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
                   {Array.from({ length: cards }, (_, i) => i + 1).map((n) => (
-                    <NumCard key={n} n={`−${3 * n}`} onClick={() => applyResult(currentId, -3 * n)} />
+                    <NumCard key={n} n={`−${3 * n}`} onClick={() => applyResult(currentId, -3 * n, false)} />
                   ))}
                 </div>
                 <p style={{ color: C.mut, fontSize: 12, marginTop: 10 }}>Cada errada resta 3 punts.</p>
+                <button onClick={() => setMissFor(null)} style={{
+                  marginTop: 8, padding: "10px 14px", borderRadius: 12,
+                  border: `1.5px solid ${C.mut}`, background: "none", color: C.cream,
+                  fontWeight: 800, fontSize: 13, cursor: "pointer",
+                }}>↩ Tornar (sí que ha encertat)</button>
               </>
             )}
           </>
+        )}
+
+        {/* Alerta: tots han "encertat" — impossible */}
+        {liarAlert && (
+          <div style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.75)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 12,
+          }}>
+            <div style={{
+              background: C.cream, color: C.ink, borderRadius: 18, padding: 22, width: "100%", maxWidth: 360,
+              textAlign: "center", border: `3px solid ${C.red}`,
+            }}>
+              <div style={{ fontSize: 44 }}>🤥</div>
+              <h2 style={{ fontFamily: font.display, margin: "6px 0 8px", color: C.red }}>Algú ha mentit!</h2>
+              <p style={{ fontWeight: 700, color: "#6B5F4E", margin: "0 0 16px", fontSize: 14 }}>
+                No podeu encertar tots: la suma d'apostes mai quadra amb les bases de la ronda.
+                Reviseu qui ha guanyat de veritat i torneu a indicar els resultats.
+              </p>
+              <button onClick={() => setLiarAlert(false)} style={{
+                width: "100%", padding: 12, borderRadius: 12, border: "none",
+                background: C.red, color: C.cream, fontFamily: font.display, fontSize: 15, cursor: "pointer",
+              }}>Tornar a indicar</button>
+            </div>
+          </div>
         )}
 
         {confirmEnd && (
