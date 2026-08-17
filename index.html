@@ -25,6 +25,7 @@
   html, body { margin: 0; padding: 0; background: #14291F; }
   * { -webkit-tap-highlight-color: transparent; }
   button:active { transform: translateY(1px); }
+  @keyframes coinspin { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
 </style>
 </head>
 <body>
@@ -60,6 +61,20 @@ const fmtDate = (iso) => {
   const d = new Date(iso);
   return d.toLocaleDateString("ca-ES", { day: "numeric", month: "short", year: "numeric" }) +
     " · " + d.toLocaleTimeString("ca-ES", { hour: "2-digit", minute: "2-digit" });
+};
+/* Durada com a cronòmetre (h:mm:ss) i com a text (1 h 23 min) */
+const fmtClock = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const pad = (x) => String(x).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+};
+const fmtDur = (ms) => {
+  if (!ms) return null;
+  const min = Math.round(ms / 60000);
+  if (min < 1) return "menys d'1 min";
+  const h = Math.floor(min / 60), m = min % 60;
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
 };
 
 /* ── Persistència amb IndexedDB ── */
@@ -413,6 +428,17 @@ function LaPodrida() {
   const [gameDetail, setGameDetail] = useState(null); // partida amb puntuació completa oberta
   const [confirmDel, setConfirmDel] = useState(null); // id de partida a eliminar
   const [liarAlert, setLiarAlert] = useState(false);  // "algú ha mentit!"
+  const [tiebreak, setTiebreak] = useState(null);     // desempat a cara o creu
+  const [showRounds, setShowRounds] = useState(false); // detall per rondes al final
+  const [detailPl, setDetailPl] = useState(null);      // jugador seleccionat al detall
+  const [, setTick] = useState(0);                     // refresc del cronòmetre
+
+  /* Cronòmetre: refresca cada segon mentre hi ha partida en marxa */
+  useEffect(() => {
+    if (view !== "game") return;
+    const t = setInterval(() => setTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [view]);
 
   /* Càrrega inicial des d'IndexedDB */
   useEffect(() => {
@@ -425,7 +451,14 @@ function LaPodrida() {
         if (gs) setGames(gs);
         if (cur) {
           setGame(cur);
-          setView(cur.phase === "done" ? "finish" : "game");
+          if (cur.phase === "done") {
+            const top = Math.max(...Object.values(cur.scores));
+            const tied = cur.playerIds.filter((id) => cur.scores[id] === top);
+            if (tied.length > 1 && !cur.tbWinner) {
+              setTiebreak({ queue: tied, choice: null, flipping: false, result: null });
+              setView("tiebreak");
+            } else setView("finish");
+          } else setView("game");
         }
       } catch (e) { console.error(e); }
       setReady(true);
@@ -457,6 +490,7 @@ function LaPodrida() {
     setGame({
       playerIds: [...order], seq, round: 0, phase: "bets",
       bets: {}, turn: 0,
+      startedAt: Date.now(), history: [],
       scores: Object.fromEntries(order.map((id) => [id, 0])),
     });
     setView("game");
@@ -482,6 +516,20 @@ function LaPodrida() {
 
   const startResults = () => setGame({ ...g, phase: "results", turn: 0, results: {} });
 
+  /* Tanca la partida: detecta empat al capdavant → desempat a cara o creu */
+  const finishGame = (base) => {
+    const top = Math.max(...Object.values(base.scores));
+    const tied = base.playerIds.filter((id) => base.scores[id] === top);
+    setFinWinner(null); setFinLoser(null);
+    setGame({ ...base, phase: "done" });
+    if (tied.length > 1) {
+      setTiebreak({ queue: tied, choice: null, flipping: false, result: null });
+      setView("tiebreak");
+    } else {
+      setView("finish");
+    }
+  };
+
   const applyResult = (id, delta, hit) => {
     const results = { ...(g.results || {}), [id]: { delta, hit } };
     const scores = { ...g.scores, [id]: g.scores[id] + delta };
@@ -499,12 +547,24 @@ function LaPodrida() {
       setLiarAlert(true);
       return;
     }
+    /* Ronda completada: es guarda al detall per rondes */
+    const newHistory = [...(g.history || []), {
+      cards,
+      entries: betOrder.map((pid) => ({
+        id: pid, bet: g.bets[pid],
+        hit: results[pid].hit, delta: results[pid].delta,
+      })),
+    }];
     if (g.round + 1 < g.seq.length) {
-      setGame({ ...g, scores, results: {}, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+      const peak = Math.max(...g.seq);
+      /* Si s'acaba la ronda màxima i la següent ja baixa → preguntar si es repeteix */
+      if (g.seq[g.round] === peak && g.seq[g.round + 1] < peak) {
+        setGame({ ...g, scores, results: {}, history: newHistory, phase: "askRepeat" });
+      } else {
+        setGame({ ...g, scores, results: {}, history: newHistory, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+      }
     } else {
-      setGame({ ...g, scores, results: {}, phase: "done" });
-      setFinWinner(null); setFinLoser(null);
-      setView("finish");
+      finishGame({ ...g, scores, results: {}, history: newHistory });
     }
   };
 
@@ -524,7 +584,7 @@ function LaPodrida() {
     : [];
 
   const saveGame = () => {
-    const winnerId = ranking[0];
+    const winnerId = g.tbWinner || ranking[0];
     const loserId = ranking[ranking.length - 1];
     setGames([
       {
@@ -532,6 +592,9 @@ function LaPodrida() {
         players: g.playerIds.map((id) => ({ profileId: id, points: g.scores[id] })),
         winnerId, loserId,
         winnerPhoto: finWinner, loserPhoto: finLoser,
+        durationMs: g.startedAt ? Date.now() - g.startedAt : null,
+        tiebreak: !!g.tbWinner,
+        history: g.history || [],
       },
       ...games,
     ]);
@@ -730,6 +793,7 @@ function LaPodrida() {
           fontWeight: 700, color: C.mut, fontSize: 14,
         }}>
           <span>🂠 {cards} {cards === 1 ? "carta" : "cartes"}</span>
+          {g.startedAt && <span>⏱ {fmtClock(Date.now() - g.startedAt)}</span>}
           <span>Reparteix: <b style={{ color: C.goldSoft }}>{dealer?.name}</b></span>
         </div>
 
@@ -864,6 +928,41 @@ function LaPodrida() {
           </>
         )}
 
+        {/* Ronda màxima acabada: una altra dona? */}
+        {g.phase === "askRepeat" && (
+          <div style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.75)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 12,
+          }}>
+            <div style={{
+              background: C.cream, color: C.ink, borderRadius: 18, padding: 22, width: "100%", maxWidth: 360,
+              textAlign: "center",
+            }}>
+              <div style={{ fontSize: 40 }}>🂠</div>
+              <h2 style={{ fontFamily: font.display, margin: "6px 0 8px" }}>Ronda de {cards} acabada!</h2>
+              <p style={{ fontWeight: 700, color: "#6B5F4E", margin: "0 0 16px", fontSize: 14 }}>
+                Voleu fer una altra dona amb {cards} cartes, o comencem a baixar?
+              </p>
+              <div style={{ display: "grid", gap: 10 }}>
+                <button onClick={() => {
+                  const seq = [...g.seq];
+                  seq.splice(g.round + 1, 0, cards);
+                  setGame({ ...g, seq, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+                }} style={{
+                  padding: 14, borderRadius: 12, border: "none", background: C.red,
+                  color: C.cream, fontFamily: font.display, fontSize: 15, cursor: "pointer",
+                }}>Sí, una altra amb {cards}!</button>
+                <button onClick={() => {
+                  setGame({ ...g, round: g.round + 1, phase: "bets", bets: {}, turn: 0 });
+                }} style={{
+                  padding: 14, borderRadius: 12, border: `2px solid ${C.ink}`, background: "none",
+                  color: C.ink, fontWeight: 800, cursor: "pointer",
+                }}>No, comencem a baixar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Alerta: tots han "encertat" — impossible */}
         {liarAlert && (
           <div style={{
@@ -908,9 +1007,7 @@ function LaPodrida() {
                 }}>Continuar jugant</button>
                 <button onClick={() => {
                   setConfirmEnd(false);
-                  setFinWinner(null); setFinLoser(null);
-                  setGame({ ...g, phase: "done" });
-                  setView("finish");
+                  finishGame({ ...g });
                 }} style={{
                   padding: 12, borderRadius: 12, border: "none", background: C.red,
                   color: C.cream, fontWeight: 800, cursor: "pointer",
@@ -952,15 +1049,116 @@ function LaPodrida() {
     );
   }
 
+  if (view === "tiebreak" && g && tiebreak) {
+    const [a, b] = tiebreak.queue;
+    const pa = byId(a), pb = byId(b);
+    const t = tiebreak;
+    const flipWinner = t.result ? (t.result === t.choice ? a : b) : null;
+    const Coin = () => (
+      <div style={{
+        width: 150, height: 150, borderRadius: "50%", margin: "20px auto",
+        background: `radial-gradient(circle at 35% 30%, ${C.goldSoft}, ${C.gold} 55%, #A87A2A)`,
+        border: "5px solid #8a6420", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+        fontFamily: font.display, color: "#5C430F",
+        animation: t.flipping ? "coinspin 0.3s linear infinite" : "none",
+        boxShadow: "0 6px 0 rgba(0,0,0,.4)",
+      }}>
+        {t.flipping ? (
+          <span style={{ fontSize: 54 }}>?</span>
+        ) : t.result ? (
+          <>
+            <span style={{ fontSize: 40 }}>{t.result === "cara" ? "👑" : "✚"}</span>
+            <span style={{ fontSize: 18 }}>{t.result.toUpperCase()}</span>
+          </>
+        ) : (
+          <span style={{ fontSize: 40 }}>🪙</span>
+        )}
+      </div>
+    );
+    return (
+      <Shell title="Desempat!">
+        <p style={{ color: C.goldSoft, fontWeight: 800, textAlign: "center", fontSize: 16, margin: "4px 0 0" }}>
+          {pa?.name} i {pb?.name} han empatat amb {g.scores[a]} punts
+        </p>
+        <div style={{ display: "flex", justifyContent: "center", gap: 30, margin: "18px 0 6px" }}>
+          <div style={{ textAlign: "center" }}>
+            <Avatar profile={pa} size={64} />
+            <div style={{ fontWeight: 800, marginTop: 4 }}>{pa?.name}</div>
+          </div>
+          <div style={{ alignSelf: "center", fontFamily: font.display, color: C.mut }}>vs</div>
+          <div style={{ textAlign: "center" }}>
+            <Avatar profile={pb} size={64} />
+            <div style={{ fontWeight: 800, marginTop: 4 }}>{pb?.name}</div>
+          </div>
+        </div>
+        <Coin />
+        {!t.choice && (
+          <>
+            <p style={{ color: C.cream, fontWeight: 800, textAlign: "center" }}>
+              {pa?.name}, tria:
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {["cara", "creu"].map((c) => (
+                <button key={c} onClick={() => {
+                  setTiebreak({ ...t, choice: c, flipping: true });
+                  setTimeout(() => {
+                    const result = Math.random() < 0.5 ? "cara" : "creu";
+                    setTiebreak((prev) => ({ ...prev, flipping: false, result }));
+                  }, 2200);
+                }} style={{
+                  padding: "16px 0", borderRadius: 14, border: "none", background: C.cream,
+                  color: C.ink, fontFamily: font.display, fontSize: 18, cursor: "pointer",
+                  boxShadow: "0 3px 0 rgba(0,0,0,.35)",
+                }}>{c === "cara" ? "👑 Cara" : "✚ Creu"}</button>
+              ))}
+            </div>
+            <p style={{ color: C.mut, fontWeight: 700, fontSize: 13, textAlign: "center", marginTop: 10 }}>
+              {pb?.name} es queda amb l'altra opció
+            </p>
+          </>
+        )}
+        {t.choice && t.flipping && (
+          <p style={{ color: C.goldSoft, fontWeight: 800, textAlign: "center", fontSize: 16 }}>
+            {pa?.name} ha triat {t.choice}... la moneda gira!
+          </p>
+        )}
+        {t.result && (
+          <div style={{ textAlign: "center" }}>
+            <h2 style={{ fontFamily: font.display, color: C.gold, fontSize: 24, margin: "6px 0 14px" }}>
+              Ha sortit {t.result}! Guanya {byId(flipWinner)?.name} 🎉
+            </h2>
+            <BigBtn accent onClick={() => {
+              const queue = [flipWinner, ...t.queue.slice(2)];
+              if (queue.length === 1) {
+                setGame({ ...g, tbWinner: flipWinner });
+                setTiebreak(null);
+                setView("finish");
+              } else {
+                setTiebreak({ queue, choice: null, flipping: false, result: null });
+              }
+            }}>Continuar</BigBtn>
+          </div>
+        )}
+      </Shell>
+    );
+  }
+
   if (view === "finish" && g) {
-    const winner = byId(ranking[0]);
+    const winnerId = g.tbWinner || ranking[0];
+    const winner = byId(winnerId);
     const loser = byId(ranking[ranking.length - 1]);
     return (
       <Shell title="Final de partida">
         <div style={{ textAlign: "center" }}>
           <h2 style={{ fontFamily: font.display, color: C.gold, fontSize: 26, margin: "4px 0" }}>
-            🏆 {winner?.name} guanya amb {g.scores[ranking[0]]} punts!
+            🏆 {winner?.name} guanya amb {g.scores[winnerId]} punts!
           </h2>
+          {g.tbWinner && (
+            <p style={{ color: C.goldSoft, fontWeight: 700, fontSize: 13, margin: "0 0 4px" }}>
+              🪙 Victòria per desempat a cara o creu
+            </p>
+          )}
           <p style={{ color: C.mut, fontWeight: 700 }}>
             💀 {loser?.name} queda últim amb {g.scores[ranking[ranking.length - 1]]}.
           </p>
@@ -996,6 +1194,74 @@ function LaPodrida() {
               setCamFor(null);
             }}
           />
+        )}
+        <button onClick={() => { setDetailPl(g.playerIds[0]); setShowRounds(true); }} style={{
+          width: "100%", padding: "12px 0", borderRadius: 12, marginBottom: 14,
+          border: `1.5px solid ${C.gold}`, background: "none", color: C.goldSoft,
+          fontWeight: 800, fontSize: 14, cursor: "pointer",
+        }}>📖 Detall per rondes</button>
+        {showRounds && (
+          <div onClick={() => setShowRounds(false)} style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.7)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 10,
+          }}>
+            <div onClick={(e) => e.stopPropagation()} style={{
+              background: C.cream, color: C.ink, borderRadius: 18, padding: 18, width: "100%", maxWidth: 380,
+              maxHeight: "82vh", overflowY: "auto",
+            }}>
+              <h2 style={{ fontFamily: font.display, margin: "0 0 12px", textAlign: "center" }}>Detall per rondes</h2>
+              <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 10 }}>
+                {g.playerIds.map((id) => (
+                  <button key={id} onClick={() => setDetailPl(id)} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "6px 12px 6px 6px",
+                    borderRadius: 999, whiteSpace: "nowrap", cursor: "pointer",
+                    border: `2px solid ${detailPl === id ? C.gold : "#D8C9B4"}`,
+                    background: detailPl === id ? "#F3E3BF" : "none", color: C.ink, fontWeight: 800,
+                  }}>
+                    <Avatar profile={byId(id)} size={26} ring={detailPl === id ? C.gold : "#D8C9B4"} />
+                    {byId(id)?.name}
+                  </button>
+                ))}
+              </div>
+              {(() => {
+                const hist = g.history || [];
+                const rows = hist.map((h, i) => ({ i, cards: h.cards, e: h.entries.find((x) => x.id === detailPl) }))
+                  .filter((r) => r.e);
+                const hits = rows.filter((r) => r.e.hit).length;
+                const miss = rows.length - hits;
+                return (
+                  <>
+                    <p style={{ textAlign: "center", fontWeight: 800, margin: "0 0 10px", color: "#6B5F4E", fontSize: 14 }}>
+                      ✓ {hits} encerts · ✕ {miss} errades
+                    </p>
+                    {rows.length === 0 && (
+                      <p style={{ textAlign: "center", color: "#6B5F4E", fontWeight: 700 }}>Encara no hi ha rondes completades.</p>
+                    )}
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {rows.map(({ i, cards: cds, e }) => (
+                        <div key={i} style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "8px 10px",
+                          background: e.hit ? "#E4EFDD" : "#F5DDD8", borderRadius: 10,
+                          fontWeight: 700, fontSize: 14,
+                        }}>
+                          <span style={{ fontFamily: font.display, width: 38 }}>R{i + 1}</span>
+                          <span style={{ flex: 1, color: "#6B5F4E" }}>{cds} 🂠 · aposta {e.bet}</span>
+                          <span style={{
+                            fontFamily: font.display, fontSize: 16,
+                            color: e.hit ? "#3E7A4E" : C.red,
+                          }}>{e.hit ? `✓ +${e.delta}` : `✕ ${e.delta}`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+              <button onClick={() => setShowRounds(false)} style={{
+                marginTop: 14, width: "100%", padding: 12, borderRadius: 12, border: "none",
+                background: C.ink, color: C.cream, fontWeight: 800, cursor: "pointer",
+              }}>Tancar</button>
+            </div>
+          </div>
         )}
         <BigBtn accent onClick={saveGame}>Guardar partida</BigBtn>
         <p style={{ color: C.mut, fontSize: 12, textAlign: "center", marginTop: 12 }}>
@@ -1041,7 +1307,7 @@ function LaPodrida() {
               <div key={gm.id} style={{ background: C.bg2, borderRadius: 16, padding: 14, border: `1px solid ${C.felt}` }}>
                 <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
                   <span style={{ color: C.mut, fontWeight: 700, fontSize: 13, flex: 1 }}>
-                    {fmtDate(gm.date)} · {gm.players.length} jugadors
+                    {fmtDate(gm.date)} · {gm.players.length} jugadors{fmtDur(gm.durationMs) ? ` · ⏱ ${fmtDur(gm.durationMs)}` : ""}
                   </span>
                   <button onClick={() => setConfirmDel(gm.id)} style={{
                     background: "none", border: `1.5px solid ${C.red}`, color: "#E07B72",

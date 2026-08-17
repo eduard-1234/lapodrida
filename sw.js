@@ -1,4 +1,4 @@
-const CACHE = "lapodrida-v4";
+const CACHE = "lapodrida-v5";
 const LOCAL = ["./", "./index.html", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
